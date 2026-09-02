@@ -690,6 +690,32 @@ extension Deque: RangeReplaceableCollection {
       return
     }
 
+    // WINDOWS PORT WORKAROUND — upstream Swift optimiser bug.
+    //
+    // The original body is kept verbatim below the `#if`. On Windows it is replaced by a
+    // per-element loop, because specialising the *first* closure below — the one that returns the
+    // sequence's `Iterator` indirectly — crashes the SIL ownership verifier at `-O`:
+    //
+    //   SIL verification failed: A load with trivial ownership must load a trivial type
+    //     %32 = load [trivial] %0 : $*CollectionOfOne<Data>.Iterator
+    //   in "specialized closure #2 in Deque.append<A>(contentsOf:)"
+    //
+    // Reproduced on x86_64-unknown-windows-msvc under BOTH the TBC 6.3.3-dev and swift.org 6.3.3
+    // toolchains, by a 25-line package: `Deque<Data>` plus an `@inlinable` generic that calls
+    // `append(contentsOf: CollectionOfOne(element))`. `Deque<String>` does NOT crash. Full record,
+    // including the ready-to-file upstream report:
+    // Swift-Windows/docs/research/2026-09-02-release-crash-reduction.md.
+    //
+    // The loop is behaviour-preserving: `append(_:)` is amortised O(1), so the documented
+    // "Amortized O(`newElements.count`)" complexity holds. What it gives up is the gap-segment bulk
+    // initialisation for sequences with no contiguous storage — the contiguous case above is
+    // untouched and still takes the fast path.
+    #if os(Windows)
+    for element in newElements {
+      _storage.ensureUnique(minimumCapacity: count + 1)
+      _storage.update { $0.uncheckedAppend(element) }
+    }
+    #else
     let underestimatedCount = newElements.underestimatedCount
     _storage.ensureUnique(minimumCapacity: count + underestimatedCount)
     var it = _storage.update { target in
@@ -706,6 +732,7 @@ extension Deque: RangeReplaceableCollection {
         target.count += gaps.initialize(copyingPrefixOf: &it)
       }
     }
+    #endif
   }
 
   /// Adds the elements of a collection to the end of the deque.
